@@ -1,0 +1,3 @@
+{"page":0,"id":11,"obj":"btn","action":"prev","x":5,"y":440,"w":300,"h":35,"bg_color":"#2C3E50","text":"\uE141","text_color":"#FFFFFF","radius":0,"border_side":0,"text_font":28}
+{"page":0,"id":12,"obj":"btn","action":"back","x":310,"y":440,"w":180,"h":35,"bg_color":"#2C3E50","text":"\uE2DC","text_color":"#FFFFFF","radius":0,"border_side":0,"text_font":22}
+{"page":0,"id":13,"obj":"btn","action":"next","x":495,"y":440,"w":300,"h":35,"bg_color":"#2C3E50","text":"\uE142","text_color":"#FFFFFF","radius":0,"border_side":0,"text_font":28}
