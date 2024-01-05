@@ -1,0 +1,318 @@
+# Underfloor Heating Pump Controller
+# ESPHome - with Dallas temperature sensor
+#
+# Controls a underfloor heating-pump. When warm water is received from the
+# central heater, warm water is entering the pump via its pipes. This is
+# detected by the temperature sensor and the pump will be switched on.
+# When the heater stops (requested temperature is reached) the flow of water
+# will cool down. The temperature sensor will detect this and will shut
+# down the pump.
+#
+# The RED LED light indicates the mode. In automatic mode (default) flashes
+# slowly.
+#
+# In case the controller is unable to connect with Home Assistant for 5 minutes,
+# the controller switches over to automatic mode.
+#
+# Manny thanks to Martin for the initial configuration!
+# https://github.com/Martinvdm/underfloor_heating_pump_controller
+
+substitutions:
+  devicename: "wemos-podloga"
+  upper_devicename: "wemos-podloga"
+
+esphome:
+  name: "$devicename"
+  platform: ESP8266
+  board: d1_mini
+  esp8266_restore_from_flash: yes
+  comment: "$upper_devicename"
+  on_boot:
+    then:
+      - script.execute: led_signaling
+      - script.execute: controller
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Wemos-Podloga Fallback Hotspot"
+    password: "v3q2qEKfngun"
+
+logger:
+
+web_server:
+  port: 80
+
+ota:
+  password: "b6c2ee943a32d3dcb8ea824fb803ea93"
+
+api:
+  encryption:
+    key: "poRZDfYUZ/SikFrovkJAvDU4E6IpAiy6SH8yEi6fpDc="
+
+globals:
+  # true when in automatic mode
+  # false when in manual mode
+  - id: g_automatic_mode
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
+  # if water temperature below this threshold
+  # pump demand automatic will be 'off' (false)
+  - id: g_threshold_temp_off
+    type: float
+    restore_value: no
+    initial_value: "69.0"
+
+  # if water temperature above this threshold
+  # pump demand automatic will be 'on' (true)
+  - id: g_threshold_temp_on
+    type: float
+    restore_value: no
+    initial_value: "70.0"
+
+  # manual demand pump
+  - id: g_pump_demand_manual
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  # demand based on water temperature
+  - id: g_pump_demand_automatic
+    type: boolean
+    restore_value: no
+    initial_value: "false"
+
+dallas:
+  - pin: D3
+    update_interval: 30s
+
+sensor:
+  - platform: dallas
+    id: sensor_water_temperature
+    name: "$upper_devicename temperature"
+    address: 0x960216254aacee28
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    filters:
+      - delta: 0.1
+    on_value:
+      then:
+        # the controller is notified when the water temperature crosses
+        # one of the thresholds
+        - lambda: |-
+            /* only useful when in automatic mode */
+            if(!id(g_automatic_mode)){
+              return;
+            }
+
+            /* only submit when something has changed */
+            auto water_temperature = id(sensor_water_temperature).state;
+
+            if (
+              water_temperature < id(sensor_threshold_temp_off).state 
+              && id(g_pump_demand_automatic)){
+                  id(g_pump_demand_automatic) = false;
+                  id(controller).execute();
+            } 
+            else if (
+              water_temperature > id(sensor_threshold_temp_on).state 
+              && !id(g_pump_demand_automatic)){
+                  id(g_pump_demand_automatic) = true;
+                  id(controller).execute();
+            }
+
+
+  - platform: wifi_signal
+    name: "$upper_devicename WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "$upper_devicename Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+    on_raw_value:
+      then:
+        - text_sensor.template.publish:
+            id: uptime_human
+            state: !lambda |-
+              int seconds = round(id(uptime_sensor).raw_state);
+              int days = seconds / (24 * 3600);
+              seconds = seconds % (24 * 3600);
+              int hours = seconds / 3600;
+              seconds = seconds % 3600;
+              int minutes = seconds /  60;
+              seconds = seconds % 60;
+              return (
+                (days ? to_string(days) + "d " : "") +
+                (hours ? to_string(hours) + "h " : "") +
+                (minutes ? to_string(minutes) + "m " : "") +
+                (to_string(seconds) + "s")
+              ).c_str();
+
+number:
+  - platform: template
+    name: "$upper_devicename Threshold off"
+    min_value: 20.0
+    max_value: 60.0
+    step: 1.0
+    restore_value: true
+    optimistic: true
+    id: sensor_threshold_temp_off
+#    unit_of_measurement: "°C"
+#    accuracy_decimals: 1
+#    lambda: return id(g_threshold_temp_off);
+    update_interval: 1ms
+#    filters:
+#      - delta: 0.1
+
+  - platform: template
+    id: sensor_threshold_temp_on
+    name: "$upper_devicename Threshold on"
+    min_value: 20.0
+    max_value: 60.0
+    step: 1.0
+    restore_value: true
+    optimistic: true
+#    unit_of_measurement: "°C"
+#    accuracy_decimals: 1
+#    lambda: return id(g_threshold_temp_on);
+    update_interval: 1ms
+#    filters:
+#      - delta: 0.1
+
+text_sensor:
+  - platform: template
+    name: "$upper_devicename Uptime Human Readable"
+    id: uptime_human
+    icon: mdi:clock-start
+
+binary_sensor:
+  # In case the API connection is lost, the controller will change
+  # to automatic mode.
+  - platform: template
+    id: sensor_api_connected
+    lambda: return global_api_server->is_connected();
+    filters:
+      - delayed_off: 5min
+    on_release:
+      then:
+        - logger.log: Lost API connection, selecting automatic mode
+        - switch.turn_on: sw_automatic_mode
+
+  # template sensor to publish pump state
+  - platform: template
+    name: "$upper_devicename Pump"
+    id: sensor_pump_state
+    lambda: return id(ps01_relay).state;
+
+switch:
+  # relay, switches pump on and off
+  - platform: gpio
+    restore_mode : ALWAYS_OFF
+    name: "$upper_devicename Relay"
+    pin: 
+      number: D1
+      inverted: false
+    id: ps01_relay
+    icon: "mdi:pump"
+
+  # Boolean input to toggle between manual or automatic mode
+  - platform: template
+    name: "$upper_devicename Manual/Automatic"
+    id: sw_automatic_mode
+    lambda: return id(g_automatic_mode);
+    turn_on_action:
+      - globals.set:
+          id: g_automatic_mode
+          value: "true"
+      - script.execute: controller
+      - script.execute: led_signaling
+    turn_off_action:
+      - globals.set:
+          id: g_automatic_mode
+          value: "false"
+      - script.execute: controller
+      - script.execute: led_signaling
+
+  # Boolean input to control manual demand
+  - platform: template
+    name: "$upper_devicename On/Off"
+    id: sw_on_off
+    lambda: return id(g_pump_demand_manual);
+    turn_on_action:
+      - globals.set:
+          id: g_pump_demand_manual
+          value: "true"
+      - script.execute: controller
+    turn_off_action:
+      - globals.set:
+          id: g_pump_demand_manual
+          value: "false"
+      - script.execute: controller
+
+script:
+  # script for calculating the demand for the pump. Should
+  # it run or not. Applies the changes to the relay.
+  - id: controller
+    then:
+      - lambda: |-
+          /* calculate if pump should be on or not */
+          bool demand = false;
+
+          if (!id(g_automatic_mode)){
+            /* manual mode */
+            demand = id(g_pump_demand_manual);
+          }
+          else{
+            /* automatic mode */
+            demand = id(g_pump_demand_automatic);
+          }
+
+          /* only send commands when needed */
+          if (demand && !id(ps01_relay).state) {
+            id(ps01_relay).turn_on();
+          } else if (!demand && id(ps01_relay).state){
+            id(ps01_relay).turn_off();
+          }
+
+  - id: led_signaling
+    then:
+      # The green led is used to show the mode of operation:
+      #  - manual mode, led is on
+      #  - automatic mode, led blinks
+      - lambda: |-
+          if (id(g_automatic_mode)){
+            auto call = id(ps01_led_light).turn_on();
+            call.set_effect("auto_effect");
+            call.perform();
+          } else {
+            auto call = id(ps01_led_light).turn_on();
+            call.set_effect("none");
+            call.perform();
+          }
+
+output:
+  - platform: esp8266_pwm
+    id: ps01_led
+    pin:
+      number: D5
+      inverted: True
+
+light:
+  - platform: monochromatic
+    output: ps01_led
+    id: ps01_led_light
+    effects:
+      - strobe:
+          name: auto_effect
+          colors:
+            - brightness: 100%
+              duration: 1s
+            - brightness: 0%
+              duration: 2s
